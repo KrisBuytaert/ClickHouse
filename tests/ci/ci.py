@@ -54,9 +54,11 @@ from git_helper import GIT_PREFIX, Git
 from git_helper import Runner as GitRunner
 from github_helper import GitHub
 from pr_info import PRInfo
-from report import ERROR, SUCCESS, BuildResult, JobReport
+from report import ERROR, FAILURE, SUCCESS, BuildResult, JobReport, TestResult
 from s3_helper import S3Helper
+from stopwatch import Stopwatch
 from synchronizer_utils import SYNC_BRANCH_PREFIX
+from tee_popen import TeePopen
 from version_helper import get_version_from_repo
 
 # pylint: disable=too-many-lines
@@ -1862,8 +1864,7 @@ def _run_test(job_name: str, run_command: str) -> int:
     ), "Run command must be provided as input argument or be configured in job config"
 
     env = os.environ.copy()
-    if CI_CONFIG.get_job_config(job_name).timeout:
-        env["KILL_TIMEOUT"] = str(CI_CONFIG.get_job_config(job_name).timeout)
+    timeout = CI_CONFIG.get_job_config(job_name).timeout or None
 
     if not run_command:
         run_command = "/".join(
@@ -1876,25 +1877,25 @@ def _run_test(job_name: str, run_command: str) -> int:
         print("Use run command from the workflow")
     env["CHECK_NAME"] = job_name
     print(f"Going to start run command [{run_command}]")
-    process = subprocess.run(
-        run_command,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        env=env,
-        text=True,
-        check=False,
-        shell=True,
-    )
+    stopwatch = Stopwatch()
+    job_log = Path(TEMP_PATH) / "job_log.txt"
+    with TeePopen(run_command, job_log, env, timeout) as process:
+        retcode = process.wait()
+        if retcode != 0:
+            print(f"Run action failed for: [{job_name}] with exit code [{retcode}]")
+            if timeout and process.timeout_exceeded:
+                print(f"Timeout {timeout} exceeded, dumping the job report")
+                JobReport(
+                    status=FAILURE,
+                    description=f"Timeout {timeout} exceeded",
+                    test_results=[TestResult.create_check_timeout_expired(timeout)],
+                    start_time=stopwatch.start_time_str,
+                    duration=stopwatch.duration_seconds,
+                    additional_files=[job_log],
+                ).dump()
 
-    if process.returncode == 0:
-        print(f"Run action done for: [{job_name}]")
-        exit_code = 0
-    else:
-        print(
-            f"Run action failed for: [{job_name}] with exit code [{process.returncode}]"
-        )
-        exit_code = process.returncode
-    return exit_code
+    print(f"Run action done for: [{job_name}]")
+    return retcode
 
 
 def _get_ext_check_name(check_name: str) -> str:
