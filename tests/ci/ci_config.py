@@ -1100,6 +1100,7 @@ CI_CONFIG = CIConfig(
                     exclude_files=[".md"],
                     docker=["clickhouse/fasttest"],
                 ),
+                timeout=2400,
             ),
         ),
         JobNames.STYLE_CHECK: TestConfig(
